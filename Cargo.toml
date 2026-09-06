@@ -1,0 +1,32 @@
+# Its own workspace root, so this repository builds on its own.
+[workspace]
+
+[package]
+name = "xmip-core-archive-parquet"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/IlleNilsson/xmip-core-archive-parquet"
+description = "Parquet archive target: retained items written as Apache Parquet files. A xmip-core-archive technology."
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# A Technology depends on its parent Capability, never the reverse
+# (repository-model.md). The ArchiveStore trait and its types live there.
+archive = { package = "xmip-core-archive", git = "https://github.com/IlleNilsson/xmip-core-archive", branch = "main" }
+arrow = "56"
+parquet = { version = "56", features = ["arrow"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+too_many_lines = "warn"
+pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "warn"
+missing_panics_doc = "warn"
+unwrap_used = "warn"
+expect_used = "allow"
