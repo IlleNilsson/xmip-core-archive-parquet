@@ -9,24 +9,22 @@
 //! error types, never the reverse. One item is one Parquet file at
 //! `<root>/<data_type>/<identifier>.parquet`, four columns — `data_type`,
 //! `identifier`, `bytes`, `metadata` — so the file is self-describing and an
-//! operator can open it with any Parquet reader.
+//! operator can open it with any Parquet reader. The metadata text and the safe
+//! file name come from the capability, `archive::metadata` and `archive::layout`
+//! (ADR-0044).
 
 use std::fmt::Display;
 use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use archive::{ArchiveError, ArchiveItem, ArchiveReceipt, ArchiveStore};
+use archive::layout::sanitise;
+use archive::{ArchiveError, ArchiveItem, ArchiveReceipt, ArchiveStore, metadata};
 use arrow::array::{Array, BinaryArray, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
-/// Record and unit separators encode the metadata pairs into the one Utf8
-/// column: pairs split on record, key from value on unit.
-const PAIR: char = '\u{1e}';
-const KV: char = '\u{1f}';
 
 /// An archive that persists items as Apache Parquet files rooted at a directory.
 pub struct ParquetArchive {
@@ -103,7 +101,7 @@ fn to_batch(item: &ArchiveItem) -> Result<RecordBatch, ArchiveError> {
             Arc::new(StringArray::from(vec![item.data_type.as_str()])),
             Arc::new(StringArray::from(vec![item.identifier.as_str()])),
             Arc::new(BinaryArray::from_iter_values([item.bytes.as_slice()])),
-            Arc::new(StringArray::from(vec![encode_metadata(&item.metadata)])),
+            Arc::new(StringArray::from(vec![metadata::encode(&item.metadata)])),
         ],
     )
     .map_err(error)
@@ -120,7 +118,7 @@ fn from_batch(batch: &RecordBatch, location: &str) -> Result<ArchiveItem, Archiv
         .ok_or_else(|| malformed(location, "bytes"))?
         .value(0)
         .to_vec();
-    let metadata = decode_metadata(&string_at(batch, 3, location)?);
+    let metadata = metadata::decode(&string_at(batch, 3, location)?);
     Ok(ArchiveItem {
         data_type,
         identifier,
@@ -139,34 +137,6 @@ fn string_at(batch: &RecordBatch, column: usize, location: &str) -> Result<Strin
         .value(0)
         .to_string();
     Ok(value)
-}
-
-fn encode_metadata(pairs: &[(String, String)]) -> String {
-    pairs
-        .iter()
-        .map(|(key, value)| format!("{key}{KV}{value}"))
-        .collect::<Vec<_>>()
-        .join(&PAIR.to_string())
-}
-
-fn decode_metadata(encoded: &str) -> Vec<(String, String)> {
-    if encoded.is_empty() {
-        return Vec::new();
-    }
-    encoded
-        .split(PAIR)
-        .filter_map(|pair| pair.split_once(KV))
-        .map(|(key, value)| (key.to_string(), value.to_string()))
-        .collect()
-}
-
-/// Make one path segment safe: anything but a plain filename character becomes an
-/// underscore, so an identifier like `poison-json#3` is a valid file name.
-fn sanitise(segment: &str) -> String {
-    segment
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
-        .collect()
 }
 
 fn error(cause: impl Display) -> ArchiveError {
@@ -218,7 +188,10 @@ mod tests {
         let original = item("json#2");
         let receipt = store.archive(original.clone()).expect("archive");
         let restored = store.restore(&receipt).expect("restore");
-        assert_eq!(restored, original, "a real Parquet read gives the item back");
+        assert_eq!(
+            restored, original,
+            "a real Parquet read gives the item back"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
