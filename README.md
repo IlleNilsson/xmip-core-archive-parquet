@@ -3,7 +3,7 @@
 Parquet archive target for Xmip: retained items written as Apache Parquet
 files. A **technology** of the `xmip-core-archive` capability — it implements
 `ArchiveStore`, depending on the capability, never the reverse
-(`docs/architecture/repository-model.md`).
+(`doc/architecture/repository-model.md`).
 
 One archived item is one Parquet file at
 `<root>/<data_type>/<identifier>.parquet`, with four columns — `data_type`,
