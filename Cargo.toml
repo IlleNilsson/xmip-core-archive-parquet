@@ -20,6 +20,11 @@ archive = { package = "xmip-core-archive", git = "https://github.com/IlleNilsson
 arrow = "56"
 parquet = { version = "56", features = ["arrow"] }
 
+[dev-dependencies]
+# The tests archive the capability's fixture item (ADR-0044); the feature
+# is enabled here so it is never part of a production build.
+archive = { package = "xmip-core-archive", git = "https://github.com/IlleNilsson/xmip-core-archive", branch = "main", features = ["test-support"] }
+
 [lints.rust]
 unsafe_code = "forbid"
 
