@@ -13,7 +13,6 @@
 //! file name come from the capability, `archive::metadata` and `archive::layout`
 //! (ADR-0044).
 
-use std::fmt::Display;
 use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -52,14 +51,15 @@ impl ArchiveStore for ParquetArchive {
     fn archive(&self, item: ArchiveItem) -> Result<ArchiveReceipt, ArchiveError> {
         let path = self.path_for(&item.data_type, &item.identifier);
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(error)?;
+            std::fs::create_dir_all(parent).map_err(ArchiveError::caused_by)?;
         }
 
         let batch = to_batch(&item)?;
-        let file = File::create(&path).map_err(error)?;
-        let mut writer = ArrowWriter::try_new(file, batch.schema(), None).map_err(error)?;
-        writer.write(&batch).map_err(error)?;
-        writer.close().map_err(error)?;
+        let file = File::create(&path).map_err(ArchiveError::caused_by)?;
+        let mut writer =
+            ArrowWriter::try_new(file, batch.schema(), None).map_err(ArchiveError::caused_by)?;
+        writer.write(&batch).map_err(ArchiveError::caused_by)?;
+        writer.close().map_err(ArchiveError::caused_by)?;
 
         Ok(ArchiveReceipt {
             location: path.display().to_string(),
@@ -68,17 +68,17 @@ impl ArchiveStore for ParquetArchive {
     }
 
     fn restore(&self, receipt: &ArchiveReceipt) -> Result<ArchiveItem, ArchiveError> {
-        let file = File::open(&receipt.location).map_err(error)?;
+        let file = File::open(&receipt.location).map_err(ArchiveError::caused_by)?;
         let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
-            .map_err(error)?
+            .map_err(ArchiveError::caused_by)?
             .build()
-            .map_err(error)?;
+            .map_err(ArchiveError::caused_by)?;
         let batch = reader
             .next()
             .ok_or_else(|| ArchiveError {
                 message: format!("no rows in {}", receipt.location),
             })?
-            .map_err(error)?;
+            .map_err(ArchiveError::caused_by)?;
         from_batch(&batch, &receipt.location)
     }
 }
@@ -104,7 +104,7 @@ fn to_batch(item: &ArchiveItem) -> Result<RecordBatch, ArchiveError> {
             Arc::new(StringArray::from(vec![metadata::encode(&item.metadata)])),
         ],
     )
-    .map_err(error)
+    .map_err(ArchiveError::caused_by)
 }
 
 /// The first row of a batch back into an item.
@@ -139,12 +139,6 @@ fn string_at(batch: &RecordBatch, column: usize, location: &str) -> Result<Strin
     Ok(value)
 }
 
-fn error(cause: impl Display) -> ArchiveError {
-    ArchiveError {
-        message: cause.to_string(),
-    }
-}
-
 fn malformed(location: &str, column: &str) -> ArchiveError {
     ArchiveError {
         message: format!("column {column} is not the expected type in {location}"),
@@ -154,21 +148,13 @@ fn malformed(location: &str, column: &str) -> ArchiveError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use archive::fixture::item;
     use std::path::Path;
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("xmip-parquet-{name}-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         dir
-    }
-
-    fn item(id: &str) -> ArchiveItem {
-        ArchiveItem {
-            data_type: "json".to_string(),
-            identifier: id.to_string(),
-            bytes: b"{\"kept\":true}".to_vec(),
-            metadata: vec![("source".to_string(), "playground".to_string())],
-        }
     }
 
     #[test]
