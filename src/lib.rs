@@ -17,7 +17,7 @@ use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use archive::layout::sanitise;
+use archive::layout::sanitize;
 use archive::{ArchiveError, ArchiveItem, ArchiveReceipt, ArchiveStore, metadata};
 use arrow::array::{Array, BinaryArray, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
@@ -42,8 +42,8 @@ impl ParquetArchive {
     /// each segment made filesystem-safe.
     fn path_for(&self, data_type: &str, identifier: &str) -> PathBuf {
         self.root
-            .join(sanitise(data_type))
-            .join(format!("{}.parquet", sanitise(identifier)))
+            .join(sanitize(data_type))
+            .join(format!("{}.parquet", sanitize(identifier)))
     }
 }
 
@@ -183,7 +183,7 @@ mod tests {
 
     #[test]
     fn a_risky_identifier_is_made_a_safe_file_name() {
-        let root = scratch("sanitise");
+        let root = scratch("sanitize");
         let store = ParquetArchive::new(&root);
         let receipt = store.archive(item("poison-json#3/../x")).expect("archive");
         assert!(Path::new(&receipt.location).exists());
