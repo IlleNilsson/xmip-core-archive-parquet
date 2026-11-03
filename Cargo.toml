@@ -17,8 +17,8 @@ path = "src/lib.rs"
 # A Technology depends on its parent Capability, never the reverse
 # (repository-model.md). The ArchiveStore trait and its types live there.
 archive = { package = "xmip-core-archive", git = "https://github.com/IlleNilsson/xmip-core-archive", branch = "main" }
-arrow = "56"
-parquet = { version = "56", features = ["arrow"] }
+arrow = "60"
+parquet = { version = "60", features = ["arrow"] }
 
 [dev-dependencies]
 # The tests archive the capability's fixture item (ADR-0044); the feature
