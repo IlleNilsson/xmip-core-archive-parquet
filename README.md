@@ -10,6 +10,14 @@ One archived item is one Parquet file at
 `identifier`, `bytes`, `metadata` — so the file is self-describing and opens in
 any Parquet reader. `restore` reads the file back into the original item.
 
+An archived item is never written over (ADR-0040, amendment 2026-11-19):
+the file is written beside its name, synced, hard-linked to the name only
+where the name is free, and its directory synced (`archive::whole`). Where
+a file is there already, the item it holds decides: the same data type,
+identifier and bytes answer the same receipt; the same identifier with
+other bytes, or another item whose name becomes the same file name, is
+refused in words (`archive::named::Claim`).
+
 ```rust
 use archive::{ArchiveItem, ArchiveStore};
 use xmip_core_archive_parquet::ParquetArchive;
