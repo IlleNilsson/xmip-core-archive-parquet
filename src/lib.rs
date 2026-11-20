@@ -18,13 +18,23 @@
 //! free (`archive::whole`). Where a file is there already, the item it holds
 //! decides (`archive::named::Claim`): the same item answers the same receipt,
 //! another — or the same identifier with other bytes — is refused in words.
+//! A file a process that died left under its mark is removed by the sweep
+//! the next write into its directory starts beside it, never one a live
+//! process holds.
+//!
+//! The receipt is the file archive's (ADR-0040, amendment 2026-11-20):
+//! `file:///<root>/<data_type>/<identifier>.parquet`, read back under the
+//! root alone (`archive::directory`), and the SHA-256 of the bytes, which a
+//! restore checks (`archive::checksum::verify`).
 
+use std::fmt::Display;
 use std::fs::File;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use archive::checksum::sha256_hex;
+use archive::checksum::{self, sha256_hex};
+use archive::directory::Directory;
 use archive::layout::sanitize;
 use archive::named::{Claim, Created};
 use archive::{ArchiveError, ArchiveItem, ArchiveReceipt, ArchiveStore, metadata, whole};
@@ -36,7 +46,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 /// An archive that persists items as Apache Parquet files rooted at a directory.
 pub struct ParquetArchive {
-    root: PathBuf,
+    directory: Directory,
 }
 
 impl ParquetArchive {
@@ -44,21 +54,26 @@ impl ParquetArchive {
     /// as items are archived.
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            directory: Directory::new(root),
+        }
     }
+}
 
-    /// The Parquet file path for an item: `<root>/<data_type>/<identifier>.parquet`,
-    /// each segment made filesystem-safe.
-    fn path_for(&self, data_type: &str, identifier: &str) -> PathBuf {
-        self.root
-            .join(sanitize(data_type))
-            .join(format!("{}.parquet", sanitize(identifier)))
-    }
+/// The key of an item's file under the root:
+/// `<data_type>/<identifier>.parquet`, each segment made filesystem-safe.
+fn key_of(item: &ArchiveItem) -> String {
+    format!(
+        "{}/{}.parquet",
+        sanitize(&item.data_type),
+        sanitize(&item.identifier)
+    )
 }
 
 impl ArchiveStore for ParquetArchive {
     fn archive(&self, item: ArchiveItem) -> Result<ArchiveReceipt, ArchiveError> {
-        let path = self.path_for(&item.data_type, &item.identifier);
+        let key = key_of(&item);
+        let path = self.directory.path_of(&key)?;
         let batch = to_batch(&item)?;
         let mut file = Vec::new();
         let mut writer = ArrowWriter::try_new(&mut file, batch.schema(), None)
@@ -66,19 +81,14 @@ impl ArchiveStore for ParquetArchive {
         writer.write(&batch).map_err(ArchiveError::caused_by)?;
         writer.close().map_err(ArchiveError::caused_by)?;
 
-        let receipt = ArchiveReceipt {
-            location: path.display().to_string(),
-            checksum: None,
-        };
+        let checksum = sha256_hex(&item.bytes);
+        let location = self.directory.location(&key);
         let created =
-            whole::create(&path, |out| out.write_all(&file)).map_err(|cause| ArchiveError {
-                message: format!("{}: {cause}", path.display()),
-            })?;
+            whole::create(&path, |out| out.write_all(&file)).map_err(|cause| at(&path, cause))?;
         if created == Created::Exists {
             // The file there is judged by the item it holds, read back as a
             // restore reads it: the same item carries on, any other is refused.
-            let held = self.restore(&receipt)?;
-            let checksum = sha256_hex(&item.bytes);
+            let held = read(&path, &location)?;
             let held_checksum = sha256_hex(&held.bytes);
             Claim {
                 data_type: &item.data_type,
@@ -91,25 +101,42 @@ impl ArchiveStore for ParquetArchive {
                     identifier: &held.identifier,
                     checksum: &held_checksum,
                 },
-                &receipt.location,
+                &location,
             )?;
         }
-        Ok(receipt)
+        Ok(ArchiveReceipt {
+            location,
+            checksum: Some(checksum),
+        })
     }
 
     fn restore(&self, receipt: &ArchiveReceipt) -> Result<ArchiveItem, ArchiveError> {
-        let file = File::open(&receipt.location).map_err(ArchiveError::caused_by)?;
-        let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
-            .map_err(ArchiveError::caused_by)?
-            .build()
-            .map_err(ArchiveError::caused_by)?;
-        let batch = reader
-            .next()
-            .ok_or_else(|| ArchiveError {
-                message: format!("no rows in {}", receipt.location),
-            })?
-            .map_err(ArchiveError::caused_by)?;
-        from_batch(&batch, &receipt.location)
+        let key = self.directory.key(&receipt.location)?;
+        let item = read(&self.directory.path_of(key)?, &receipt.location)?;
+        checksum::verify(receipt, None, &item.bytes)?;
+        Ok(item)
+    }
+}
+
+/// The item the Parquet file at `path` holds, which `location` names.
+fn read(path: &Path, location: &str) -> Result<ArchiveItem, ArchiveError> {
+    let file = File::open(path).map_err(|cause| at(path, cause))?;
+    let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(ArchiveError::caused_by)?
+        .build()
+        .map_err(ArchiveError::caused_by)?;
+    let batch = reader
+        .next()
+        .ok_or_else(|| ArchiveError {
+            message: format!("no rows in {location}"),
+        })?
+        .map_err(ArchiveError::caused_by)?;
+    from_batch(&batch, location)
+}
+
+fn at(path: &Path, cause: impl Display) -> ArchiveError {
+    ArchiveError {
+        message: format!("{}: {cause}", path.display()),
     }
 }
 
@@ -180,7 +207,6 @@ mod tests {
     use super::*;
     use archive::fixture::item;
     use file::temporary::Folder;
-    use std::path::Path;
 
     fn other_bytes(id: &str) -> ArchiveItem {
         ArchiveItem {
@@ -195,7 +221,8 @@ mod tests {
         let store = ParquetArchive::new(&*root);
         let receipt = store.archive(item("json#1")).expect("archive");
         assert!(receipt.location.ends_with(".parquet"));
-        assert!(Path::new(&receipt.location).exists(), "the file is on disk");
+        let path = root.join("json").join("json_1.parquet");
+        assert!(path.exists(), "the file is on disk");
     }
 
     #[test]
@@ -216,7 +243,8 @@ mod tests {
         let root = Folder::new("archive-parquet-sanitize");
         let store = ParquetArchive::new(&*root);
         let receipt = store.archive(item("poison-json#3/../x")).expect("archive");
-        assert!(Path::new(&receipt.location).exists());
+        let path = root.join("json").join("poison-json_3____x.parquet");
+        assert!(path.exists(), "the file is on disk");
         assert!(!receipt.location.contains(".."), "no traversal survives");
     }
 
@@ -254,5 +282,90 @@ mod tests {
             "{refused}"
         );
         assert_eq!(store.restore(&receipt).expect("restore"), item("json#1"));
+    }
+
+    /// The names in `dir`, sorted.
+    fn names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("listing")
+            .map(|entry| {
+                entry
+                    .expect("an entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn the_receipt_is_a_file_uri_under_the_root_with_the_sha256_of_the_bytes() {
+        let root = Folder::new("archive-parquet-receipt");
+        let store = ParquetArchive::new(&*root);
+        let original = item("json#1");
+        let receipt = store.archive(original.clone()).expect("archive");
+        assert!(
+            receipt.location.starts_with("file:///"),
+            "{}",
+            receipt.location
+        );
+        assert!(
+            receipt.location.ends_with("/json/json_1.parquet"),
+            "{}",
+            receipt.location
+        );
+        assert_eq!(receipt.checksum, Some(sha256_hex(&original.bytes)));
+        assert_eq!(store.restore(&receipt).expect("restore"), original);
+    }
+
+    #[test]
+    fn bytes_changed_since_they_were_archived_are_refused_on_restore() {
+        let root = Folder::new("archive-parquet-changed");
+        let store = ParquetArchive::new(&*root);
+        let receipt = store.archive(item("json#1")).expect("archive");
+        // The same item with other bytes, archived elsewhere, put over the
+        // file the receipt names.
+        let elsewhere = Folder::new("archive-parquet-changed-elsewhere");
+        ParquetArchive::new(&*elsewhere)
+            .archive(other_bytes("json#1"))
+            .expect("archived elsewhere");
+        let file = Path::new("json").join("json_1.parquet");
+        std::fs::remove_file(root.join(&file)).expect("the archived file");
+        std::fs::copy(elsewhere.join(&file), root.join(&file)).expect("other bytes");
+        let refused = store.restore(&receipt).expect_err("changed underneath");
+        assert!(refused.message.contains("checksum mismatch"), "{refused}");
+        let mut lying = receipt;
+        lying.checksum = Some("0".repeat(64));
+        let refused = store.restore(&lying).expect_err("the receipt lies");
+        assert!(refused.message.contains("checksum mismatch"), "{refused}");
+    }
+
+    #[test]
+    fn a_receipt_from_under_another_root_is_refused() {
+        let root = Folder::new("archive-parquet-elsewhere");
+        let store = ParquetArchive::new(&*root);
+        let receipt = ArchiveReceipt {
+            location: "file:///elsewhere/json/x.parquet".to_string(),
+            checksum: None,
+        };
+        let refused = store.restore(&receipt).expect_err("another root");
+        assert!(refused.message.contains("not a receipt"), "{refused}");
+    }
+
+    #[test]
+    fn a_file_left_under_its_mark_is_removed_by_the_next_archive_into_its_directory() {
+        let root = Folder::new("archive-parquet-left");
+        let store = ParquetArchive::new(&*root);
+        // What a process that died between a write and its link left: a
+        // file under the mark, held by no process.
+        let directory = root.join("json");
+        std::fs::create_dir_all(&directory).expect("the directory");
+        let left = "json_0.parquet.xmip-archiving.4294967295.0";
+        std::fs::write(directory.join(left), b"PAR1").expect("a file left behind");
+        store.archive(item("json#1")).expect("archive");
+        whole::swept(&directory);
+        assert_eq!(names(&directory), ["json_1.parquet"]);
     }
 }
