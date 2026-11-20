@@ -179,26 +179,8 @@ fn malformed(location: &str, column: &str) -> ArchiveError {
 mod tests {
     use super::*;
     use archive::fixture::item;
+    use file::temporary::Folder;
     use std::path::Path;
-
-    /// A root of its own under the temporary directory, removed when the
-    /// test ends, also when it fails.
-    struct Scratch(PathBuf);
-
-    impl Scratch {
-        fn new(name: &str) -> Self {
-            let dir =
-                std::env::temp_dir().join(format!("xmip-parquet-{name}-{}", std::process::id()));
-            std::fs::remove_dir_all(&dir).ok();
-            Self(dir)
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            std::fs::remove_dir_all(&self.0).ok();
-        }
-    }
 
     fn other_bytes(id: &str) -> ArchiveItem {
         ArchiveItem {
@@ -209,8 +191,8 @@ mod tests {
 
     #[test]
     fn an_archived_item_becomes_a_parquet_file_on_disk() {
-        let root = Scratch::new("write");
-        let store = ParquetArchive::new(&root.0);
+        let root = Folder::new("archive-parquet-write");
+        let store = ParquetArchive::new(&*root);
         let receipt = store.archive(item("json#1")).expect("archive");
         assert!(receipt.location.ends_with(".parquet"));
         assert!(Path::new(&receipt.location).exists(), "the file is on disk");
@@ -218,8 +200,8 @@ mod tests {
 
     #[test]
     fn the_file_is_real_parquet_and_restores_the_item() {
-        let root = Scratch::new("roundtrip");
-        let store = ParquetArchive::new(&root.0);
+        let root = Folder::new("archive-parquet-roundtrip");
+        let store = ParquetArchive::new(&*root);
         let original = item("json#2");
         let receipt = store.archive(original.clone()).expect("archive");
         let restored = store.restore(&receipt).expect("restore");
@@ -231,8 +213,8 @@ mod tests {
 
     #[test]
     fn a_risky_identifier_is_made_a_safe_file_name() {
-        let root = Scratch::new("sanitize");
-        let store = ParquetArchive::new(&root.0);
+        let root = Folder::new("archive-parquet-sanitize");
+        let store = ParquetArchive::new(&*root);
         let receipt = store.archive(item("poison-json#3/../x")).expect("archive");
         assert!(Path::new(&receipt.location).exists());
         assert!(!receipt.location.contains(".."), "no traversal survives");
@@ -240,8 +222,8 @@ mod tests {
 
     #[test]
     fn an_identifier_archived_again_with_the_same_bytes_answers_the_same_receipt() {
-        let root = Scratch::new("same");
-        let store = ParquetArchive::new(&root.0);
+        let root = Folder::new("archive-parquet-same");
+        let store = ParquetArchive::new(&*root);
         let first = store.archive(item("json#1")).expect("archive");
         let again = store.archive(item("json#1")).expect("archived again");
         assert_eq!(again, first);
@@ -250,8 +232,8 @@ mod tests {
 
     #[test]
     fn an_identifier_archived_again_with_other_bytes_is_refused_and_the_earlier_receipt_restores() {
-        let root = Scratch::new("other");
-        let store = ParquetArchive::new(&root.0);
+        let root = Folder::new("archive-parquet-other");
+        let store = ParquetArchive::new(&*root);
         let receipt = store.archive(item("json#1")).expect("archive");
         let refused = store
             .archive(other_bytes("json#1"))
